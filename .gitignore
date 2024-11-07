@@ -1,0 +1,6 @@
+*.csv
+*.md
+*.pdf
+.env
+/tests/
+/docs/
