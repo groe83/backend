@@ -1,50 +1,74 @@
-# prediccion/models_prediccion.py
 import pandas as pd
-from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.preprocessing import PolynomialFeatures
 from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.metrics import mean_squared_error
-import xgboost as xgb
-from statsmodels.tsa.arima.model import ARIMA
 from prophet import Prophet
-
-class ModeloTiempoTraslado:
-    def __init__(self, df):
-        self.df = df
-    
-    def entrenar_modelo(self):
-        X = self.df[['fecha_viaje', 'vehiculo_id_externo', 'conductor_id_externo', 'direccion_origen', 'direccion_destino', 'orden_ruta']]
-        y = self.df['tiempo_estimado_traslado']
-        
-        poly_model = PolynomialFeatures(degree=2)
-        X_poly = poly_model.fit_transform(X)
-        
-        # Modelo Gradient Boosting
-        self.model = GradientBoostingRegressor()
-        self.model.fit(X_poly, y)
-    
-    def predecir(self, nuevos_datos):
-        nuevos_datos_poly = PolynomialFeatures(degree=2).fit_transform(nuevos_datos)
-        return self.model.predict(nuevos_datos_poly)
+from datetime import datetime, timedelta
+from viaje.models import Viaje
 
 
 class ModeloDemandaAlojamiento:
-    def __init__(self, df):
-        self.df = df
-    
-    def entrenar_arima(self):
-        y = self.df.set_index('fecha_viaje')['ocupacion_alojamiento']
-        arima_model = ARIMA(y, order=(1, 1, 1))
-        self.model_arima = arima_model.fit()
+    def __init__(self, df=None):
+        self.model_prophet = None
+        self.df_historico = None
+        if df is not None:
+            self.df_historico = df[['ds', 'y']].copy()
 
-    def predecir_arima(self, steps=30):
-        return self.model_arima.forecast(steps=steps)
+    def entrenar_prophet(self, df):
+        """
+        Entrena el modelo Prophet utilizando los datos históricos proporcionados.
+        """
+        self.df_historico = df[['ds', 'y']].copy()
 
-    def entrenar_prophet(self):
-        df_prophet = self.df.rename(columns={'fecha_viaje': 'ds', 'ocupacion_alojamiento': 'y'})
-        self.model_prophet = Prophet(yearly_seasonality=True)
-        self.model_prophet.fit(df_prophet)
+        # Configuración del modelo Prophet
+        self.model_prophet = Prophet(yearly_seasonality=True, weekly_seasonality=True)
+        self.model_prophet.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+        self.model_prophet.fit(self.df_historico)
 
     def predecir_prophet(self, periods=30):
+        """
+        Genera predicciones para el número de períodos especificados (por defecto 30 días).
+        """
         future_dates = self.model_prophet.make_future_dataframe(periods=periods)
+        forecast = self.model_prophet.predict(future_dates)
+        return forecast[['ds', 'yhat']]
+
+    def generar_alerta(self, demanda_estimada, fecha_objetivo):
+        """
+        Genera una alerta si la demanda estimada supera el 20% del promedio del año anterior.
+        """
+        fecha_objetivo = pd.Timestamp(fecha_objetivo)
+        fecha_inicio_anterior = fecha_objetivo - timedelta(days=365)
+
+        # Filtrar los datos históricos del mismo mes en el año anterior
+        df_anterior = self.df_historico[
+            (pd.to_datetime(self.df_historico['ds']) >= fecha_inicio_anterior) &
+            (pd.to_datetime(self.df_historico['ds']) <= fecha_objetivo)
+        ]
+
+        if df_anterior.empty:
+            return "Sin datos para el año anterior."
+
+        promedio_anno_anterior = df_anterior['y'].mean()
+        if demanda_estimada > 1.2 * promedio_anno_anterior:
+            return f"Alerta: La demanda estimada es un 20% superior al promedio del mismo mes del año anterior ({promedio_anno_anterior:.0f})."
+
+        return "La demanda estimada está dentro del rango esperado."
+
+
+class ModeloTiempoTraslado:
+    def __init__(self):
+        self.model_prophet = None
+
+    def entrenar_prophet(self, df):
+        # Guardar los datos históricos
+        self.df_historico = df[['ds', 'y']].copy()
+
+        # Crear y entrenar el modelo Prophet
+        self.model_prophet = Prophet(yearly_seasonality=True, weekly_seasonality=True)
+        self.model_prophet.fit(self.df_historico)
+
+    def predecir_prophet(self, periods=7):
+        # Crear un rango futuro de fechas
+        future_dates = self.model_prophet.make_future_dataframe(periods=periods, freq='W')
         forecast = self.model_prophet.predict(future_dates)
         return forecast[['ds', 'yhat']]
