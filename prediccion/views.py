@@ -54,28 +54,38 @@ def predecir_tiempo_traslado(request):
         # Agregar columna `y_horas`
         historico_mensual['y_horas'] = historico_mensual['y'].apply(lambda minutos: f"{int(minutos // 60)}h {int(minutos % 60)}m")
 
+        # Promedio histórico por mes
+        promedio_estacional = historico_mensual.groupby(historico_mensual['ds'].str[-2:]).agg({'y': 'mean'}).reset_index()
+        promedio_estacional.rename(columns={'ds': 'mes', 'y': 'y_estacional'}, inplace=True)
+        promedio_estacional['mes'] = promedio_estacional['mes'].astype(str)
+
         # Entrenar modelo Prophet
         modelo = Prophet()
         # Convertir `ds` nuevamente a timestamp para Prophet
         historico_mensual['ds'] = pd.to_datetime(historico_mensual['ds'])
         modelo.fit(historico_mensual[['ds', 'y']])
 
-        # Generar predicciones solo para diciembre de 2024
-        future = pd.DataFrame({'ds': [pd.Timestamp("2024-12-01")]})
+        # Generar predicciones para diciembre 2024 y enero-junio 2025
+        future = modelo.make_future_dataframe(periods=8, freq='M')
         forecast = modelo.predict(future)
 
-        # Filtrar predicciones para diciembre de 2024
-        predicciones = forecast[['ds', 'yhat']]
-        predicciones['y'] = predicciones['yhat'].round()
-        predicciones['ds'] = predicciones['ds'].dt.to_period('M').astype(str)  # Convertir períodos a cadenas
-        predicciones['y_horas'] = predicciones['y'].apply(lambda minutos: f"{int(minutos // 60)}h {int(minutos % 60)}m")
+        # Filtrar predicciones para diciembre 2024 y enero-junio 2025
+        predicciones = forecast[(forecast['ds'] >= "2024-12-01") & (forecast['ds'] <= "2025-07-30")]
+        predicciones['yhat'] = predicciones['yhat'].round()
+
+        # Predicciones basándose en los datos históricos
+        predicciones['mes'] = predicciones['ds'].dt.month.astype(str).str.zfill(2)
+        predicciones = pd.merge(predicciones, promedio_estacional, left_on='mes', right_on='mes', how='left')
+        predicciones['y_ajustada'] = (predicciones['yhat'] * 0.6 + predicciones['y_estacional'] * 0.4).round()
+
+        # Formatear resultados
+        predicciones['y_horas'] = predicciones['y_ajustada'].apply(lambda minutos: f"{int(minutos // 60)}h {int(minutos % 60)}m")
+        predicciones['ds'] = predicciones['ds'].dt.to_period('M').astype(str)
+        predicciones = predicciones[['ds', 'y_ajustada', 'y_horas']].rename(columns={'y_ajustada': 'y'})
 
         # Formatear datos históricos
-        historico_mensual['ds'] = historico_mensual['ds'].dt.to_period('M').astype(str)  # Convertir períodos a cadenas
+        historico_mensual['ds'] = historico_mensual['ds'].dt.to_period('M').astype(str)
         historico_mensual = historico_mensual[['ds', 'y', 'y_horas']]
-
-        # Formatear predicciones
-        predicciones = predicciones[['ds', 'y', 'y_horas']]
 
         return JsonResponse({
             "historico_tiempo_traslado_mensual": historico_mensual.to_dict(orient='records'),
@@ -85,7 +95,6 @@ def predecir_tiempo_traslado(request):
     except Exception as e:
         error_message = str(e)
         return JsonResponse({"error": "Error al obtener los datos de la base de datos", "detalle": error_message}, status=500)
-
 
 
 
@@ -140,8 +149,8 @@ def predecir_demanda_semanal(request):
         modelo.add_seasonality(name='monthly', period=30.5, fourier_order=5)
         modelo.fit(ocupaciones_df_historial)
 
-        # Predecir para los próximos 3 meses a partir de diciembre de 2024
-        future_dates = modelo.make_future_dataframe(periods=90, freq='D')
+        # Predecir para los próximos meses a partir de diciembre de 2024
+        future_dates = modelo.make_future_dataframe(periods=210, freq='D')
         forecast = modelo.predict(future_dates)
         forecast['mes'] = forecast['ds'].dt.to_period('M')
         prediccion_mensual = forecast.groupby('mes')['yhat'].median().reset_index()  # Usar mediana para suavizar predicción
